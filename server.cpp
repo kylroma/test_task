@@ -1,23 +1,16 @@
 #include "server.h"
-#include "processRequests.h"
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <err.h>
-#include <errno.h>
 #include <string.h>
 
 #include <vector>
-
-
 #include <iostream>
 #include <unistd.h>
+
 using namespace std;
 
 Server::Server() : isRunServer(true)
@@ -25,15 +18,20 @@ Server::Server() : isRunServer(true)
 
 }
 
-void Server::runServer()
+bool Server::runServer()
 {
-    if(connect()) {
+    isRunServer = connect();
+    if(isRunServer.load()) {
         mListenThread = std::thread(&Server::listenConnections, this);
     }
+
+    return isRunServer.load();
 }
 
 Server::~Server()
 {
+    stopServer();
+
     if(mListenThread.joinable()) {
         mListenThread.join();
     }
@@ -53,8 +51,8 @@ bool Server::connect()
 
     mSocet = socket(AF_INET, SOCK_STREAM, 0);
     if (mSocet < 0) {
-       cerr << "Can't open socket: " <<  strerror(errno) << endl;
-       return result;
+        cerr << "Can't open socket: " <<  strerror(errno) << endl;
+        return result;
     }
 
     setsockopt(mSocet, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(int));
@@ -65,11 +63,12 @@ bool Server::connect()
     svrAddr.sin_port = htons(port);
 
     if (bind(mSocet, (struct sockaddr *) &svrAddr, sizeof(svrAddr)) == -1) {
-      close(mSocet);
-      cerr << "Can't bind: " <<  strerror(errno) << endl;
-      return result;
+        close(mSocet);
+        cerr << "Can't bind: " <<  strerror(errno) << endl;
+        return result;
     }
 
+    cout << "Port of server: " << port << endl;
     return true;
 }
 
@@ -84,42 +83,54 @@ void Server::listenConnections()
     listen(mSocet, 5);
 
     while (isRunServer.load()) {
-      int clientFd = accept(mSocet, (struct sockaddr *) &cliAddr, &sinLen);
+        int clientFd = accept(mSocet, (struct sockaddr *) &cliAddr, &sinLen);
 
-      if (clientFd == -1 ) {
-          if(isRunServer.load()) {
-              cerr << "Can't accept: " <<  strerror(errno) << endl;
-          }
-          continue;
-      }
+        if (clientFd == -1 ) {
+            if(isRunServer.load()) {
+                cerr << "Can't accept: " <<  strerror(errno) << endl;
+            }
+            continue;
+        }
 
-      sizeRead = read( clientFd , buffer.data(), buffer.size()-1);
+        sizeRead = read( clientFd , buffer.data(), buffer.size()-1);
 
-      if(sizeRead < 1) {
-          continue;
-      }
+        if(sizeRead < 1) {
+            continue;
+        }
 
-      buffer[sizeRead] = '\0';
+        buffer[sizeRead] = '\0';
 
-      auto processReqest = [](int clientSocket, string request){
-          ProcessRequests pRequest;
-          string response = pRequest.processRequest(request);
-          cout << response << endl << endl;
+        auto cmd = [this](int clientSocket, string request) {
+            auto sender = [&clientSocket](const char *msg, const size_t size) {
+                for(size_t total = 0; total < size; ) {
+                    int num = send(clientSocket, (msg + total), (size - total), 0);
+                    if(num == -1) {
+                        break;
+                    }
+                    total += num;
+                }
+            };
 
-          for(unsigned total = 0; total < response.size(); ) {
-              int num = send(clientSocket, (response.c_str() + total)
-                          , (response.size() - total), 0);
+            getStdOutFromCommand(request, sender);
 
-              if(num == -1) {
-                  break;
-              }
-              total += num;
-          }
+            close(clientSocket);
+        };
 
-          close(clientSocket);
-      };
+        thread(cmd, clientFd, buffer.data()).detach();
+    }
+}
 
-      string request = buffer.data();
-      thread(processReqest, clientFd, request).detach();
+void Server::getStdOutFromCommand(const std::string &cmd, sender_t sender)
+{
+    const int MAX_BUFF = 1024*1024;
+    vector<char> buffer(MAX_BUFF);
+
+    const auto deleter = [&](FILE *p) { pclose(p); };
+    unique_ptr<FILE, decltype(deleter)> pipe { popen(cmd.c_str(), "r"), deleter};
+
+    if (pipe) {
+        while (fgets(buffer.data(), buffer.size(), pipe.get()) != NULL) {
+            sender(buffer.data(), strlen(buffer.data()));
+        }
     }
 }

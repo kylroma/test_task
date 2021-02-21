@@ -7,14 +7,17 @@ using namespace std;
 int main()
 {
     Server s;
-    s.runServer();
-
-    string cmd;
-    while (cmd != "exit") {
-        cin >> cmd;
+    if(s.runServer()) {
+        cout << "To close the application write \"exit\" or \"q\"\n";
+        string cmd;
+        
+        while (true) {
+            cin >> cmd;
+            if(cmd == "exit" || cmd == "q") {
+                break;
+            }
+        }
     }
 
-    s.stopServer();
-    cout << "Hello World!" << endl;
     return 0;
 }
